@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use io_uring::{opcode, types, IoUring};
+use nix::errno;
 use nix::libc::iovec;
 use nix::libc::msghdr;
 use nix::sys::socket::{sockaddr, InetAddr, SockAddr};
@@ -40,13 +41,15 @@ fn sender(batch_size: usize, msg_size: usize) -> std::io::Result<()> {
     let sockaddr = "127.0.0.1:7200".parse().expect("Could not parse");
     let sock_addr = SockAddr::new_inet(InetAddr::from_std(&sockaddr));
     let (mname, mlen) = sock_addr.as_ffi_pair();
-    let hdrs: Vec<msghdr> = (0..batch_size)
-        .map(|i| {
-            let mut mname = mname.clone();
+    let mut iovecs: Vec<IoVec<&[u8]>> = buf.iter().map(|buf| IoVec::from_slice(&buf[..])).collect();
+    let hdrs: Vec<msghdr> = iovecs
+        .iter_mut()
+        .map(|iovec| {
+            let mut mname = *mname;
             msghdr {
                 msg_name: &mut mname as *mut sockaddr as *mut c_void,
                 msg_namelen: mlen,
-                msg_iov: &mut [IoVec::from_slice(&buf[i][..])] as *mut IoVec<&[u8]> as *mut iovec,
+                msg_iov: iovec as *mut IoVec<&[u8]> as *mut iovec,
                 msg_iovlen: 1,
                 msg_flags: 0,
                 msg_controllen: 0,
@@ -63,8 +66,11 @@ fn sender(batch_size: usize, msg_size: usize) -> std::io::Result<()> {
     }
     ioring.submit_and_wait(batch_size)?;
     for cqe in ioring.completion() {
-        let result = cqe.result() as usize;
+        let result = cqe.result();
         println!("result was {result}");
+        if result < 0 {
+            println!("This is {}", errno::from_i32(-cqe.result()));
+        }
     }
     // }
     Ok(())
