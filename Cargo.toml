@@ -9,3 +9,4 @@ authors = ["Aurojit Panda <apanda@cs.nyu.edu>"]
 [dependencies]
 io-uring = "0.5.2"
 clap = {version = "3.0.14", features=["derive"]}
+nix = "0.23.1"
