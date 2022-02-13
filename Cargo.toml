@@ -1,0 +1,11 @@
+[package]
+name = "fastio"
+version = "0.1.0"
+edition = "2021"
+authors = ["Aurojit Panda <apanda@cs.nyu.edu>"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+io-uring = "0.5.2"
+clap = {version = "3.0.14", features=["derive"]}
