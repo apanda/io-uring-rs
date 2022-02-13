@@ -45,7 +45,9 @@ fn sender(batch_size: usize, msg_size: usize) -> std::io::Result<()> {
     let hdrs: Vec<msghdr> = iovecs
         .iter_mut()
         .map(|iovec| {
-            let mut mname = *mname;
+            // Clippy is wrong in this case. Replacing `clone()` with
+            // Copy will break this code.
+            let mut mname = mname.clone();
             msghdr {
                 msg_name: &mut mname as *mut sockaddr as *mut c_void,
                 msg_namelen: mlen,
@@ -57,7 +59,6 @@ fn sender(batch_size: usize, msg_size: usize) -> std::io::Result<()> {
             }
         })
         .collect();
-    // loop {
     for hdr in hdrs.iter() {
         let write_e = opcode::SendMsg::new(types::Fd(sock_fd), hdr as _).build();
         unsafe {
@@ -72,7 +73,6 @@ fn sender(batch_size: usize, msg_size: usize) -> std::io::Result<()> {
             println!("This is {}", errno::from_i32(-cqe.result()));
         }
     }
-    // }
     Ok(())
 }
 
