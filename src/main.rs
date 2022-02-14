@@ -85,7 +85,7 @@ fn receiver(batch_size: usize) -> std::io::Result<()> {
     let buf = vec![vec![0; 2048]; batch_size];
     // sockaddr_storage is guaranteed to be large enough to hold any possible address.
     let mut sockaddrs: Vec<sockaddr_storage> =
-        (0..batch_size).map(|_| unsafe { mem::zeroed() }).collect();
+        (0..batch_size).map(|_| unsafe { mem::MaybeUninit::zeroed().assume_init() }).collect();
     let mut iovecs: Vec<IoVec<&[u8]>> = buf.iter().map(|buf| IoVec::from_slice(&buf[..])).collect();
     let mut hdrs: Vec<msghdr> = iovecs
         .iter_mut()
