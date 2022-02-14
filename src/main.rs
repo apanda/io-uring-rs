@@ -36,7 +36,7 @@ fn sender(batch_size: usize, msg_size: usize) -> std::io::Result<()> {
     builder.dontfork();
     let sock = UdpSocket::bind("127.0.0.1:0").expect("Could not bind port. Why? Who knows.");
     let sock_fd = sock.as_raw_fd();
-    let mut ioring = builder.build(32)?;
+    let mut ioring = builder.build(batch_size as u32)?;
     let buf: Vec<Vec<u8>> = vec![vec![0; msg_size]; batch_size];
     let sockaddr = "127.0.0.1:7200".parse().expect("Could not parse");
     let sock_addr = SockAddr::new_inet(InetAddr::from_std(&sockaddr));
@@ -44,12 +44,11 @@ fn sender(batch_size: usize, msg_size: usize) -> std::io::Result<()> {
     let mut iovecs: Vec<IoVec<&[u8]>> = buf.iter().map(|buf| IoVec::from_slice(&buf[..])).collect();
     // Clippy is wrong in this case. Replacing `clone()` with
     // Copy will break this code.
-    let mut mnames: Vec<sockaddr> = (0..batch_size).map(|_| mname.clone()).collect();
+    let mut mname = mname.clone();
     let hdrs: Vec<msghdr> = iovecs
         .iter_mut()
-        .zip(mnames.iter_mut())
-        .map(|(iovec, mname)| msghdr {
-            msg_name: mname as *mut sockaddr as *mut c_void,
+        .map(|iovec| msghdr {
+            msg_name: &mut mname as *mut sockaddr as *mut c_void,
             msg_namelen: mlen,
             msg_iov: iovec as *mut IoVec<&[u8]> as *mut iovec,
             msg_iovlen: 1,
@@ -82,7 +81,7 @@ fn receiver(batch_size: usize) -> std::io::Result<()> {
     let sock =
         UdpSocket::bind("127.0.0.1:7200").expect("Could not bind port 7200. Why? Who knows.");
     let sock_fd = sock.as_raw_fd();
-    let mut ioring = builder.build(32)?;
+    let mut ioring = builder.build(batch_size as u32)?;
     let mut buf = vec![vec![0; 2048]; batch_size];
     loop {
         for buf in buf.iter_mut() {
