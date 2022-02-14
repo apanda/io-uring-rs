@@ -42,38 +42,38 @@ fn sender(batch_size: usize, msg_size: usize) -> std::io::Result<()> {
     let sock_addr = SockAddr::new_inet(InetAddr::from_std(&sockaddr));
     let (mname, mlen) = sock_addr.as_ffi_pair();
     let mut iovecs: Vec<IoVec<&[u8]>> = buf.iter().map(|buf| IoVec::from_slice(&buf[..])).collect();
+    // Clippy is wrong in this case. Replacing `clone()` with
+    // Copy will break this code.
+    let mut mnames: Vec<sockaddr> = (0..batch_size).map(|_| mname.clone()).collect();
     let hdrs: Vec<msghdr> = iovecs
         .iter_mut()
-        .map(|iovec| {
-            // Clippy is wrong in this case. Replacing `clone()` with
-            // Copy will break this code.
-            let mut mname = mname.clone();
-            msghdr {
-                msg_name: &mut mname as *mut sockaddr as *mut c_void,
-                msg_namelen: mlen,
-                msg_iov: iovec as *mut IoVec<&[u8]> as *mut iovec,
-                msg_iovlen: 1,
-                msg_flags: 0,
-                msg_controllen: 0,
-                msg_control: ptr::null_mut(),
-            }
+        .zip(mnames.iter_mut())
+        .map(|(iovec, mname)| msghdr {
+            msg_name: mname as *mut sockaddr as *mut c_void,
+            msg_namelen: mlen,
+            msg_iov: iovec as *mut IoVec<&[u8]> as *mut iovec,
+            msg_iovlen: 1,
+            msg_flags: 0,
+            msg_controllen: 0,
+            msg_control: ptr::null_mut(),
         })
         .collect();
-    for hdr in hdrs.iter() {
-        let write_e = opcode::SendMsg::new(types::Fd(sock_fd), hdr as _).build();
-        unsafe {
-            ioring.submission().push(&write_e).expect("Could not push");
+    loop {
+        for hdr in hdrs.iter() {
+            let write_e = opcode::SendMsg::new(types::Fd(sock_fd), hdr as _).build();
+            unsafe {
+                ioring.submission().push(&write_e).expect("Could not push");
+            }
+        }
+        ioring.submit_and_wait(batch_size)?;
+        for cqe in ioring.completion() {
+            let result = cqe.result();
+            println!("result was {result}");
+            if result < 0 {
+                println!("This is {}", errno::from_i32(-cqe.result()));
+            }
         }
     }
-    ioring.submit_and_wait(batch_size)?;
-    for cqe in ioring.completion() {
-        let result = cqe.result();
-        println!("result was {result}");
-        if result < 0 {
-            println!("This is {}", errno::from_i32(-cqe.result()));
-        }
-    }
-    Ok(())
 }
 
 fn receiver(batch_size: usize) -> std::io::Result<()> {
