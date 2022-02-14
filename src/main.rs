@@ -1,10 +1,10 @@
 use clap::{Parser, Subcommand};
 use io_uring::{opcode, types, IoUring};
 use nix::errno;
-use nix::libc::iovec;
-use nix::libc::msghdr;
+use nix::libc::{iovec, msghdr, sockaddr_storage};
 use nix::sys::socket::{sockaddr, InetAddr, SockAddr};
 use nix::sys::uio::IoVec;
+use std::mem;
 use std::net::UdpSocket;
 use std::os::raw::c_void;
 use std::os::unix::io::AsRawFd;
@@ -69,7 +69,7 @@ fn sender(batch_size: usize, msg_size: usize) -> std::io::Result<()> {
             let result = cqe.result();
             println!("result was {result}");
             if result < 0 {
-                println!("This is {}", errno::from_i32(-cqe.result()));
+                println!("Error: {}", errno::from_i32(-cqe.result()));
             }
         }
     }
@@ -82,26 +82,57 @@ fn receiver(batch_size: usize) -> std::io::Result<()> {
         UdpSocket::bind("127.0.0.1:7200").expect("Could not bind port 7200. Why? Who knows.");
     let sock_fd = sock.as_raw_fd();
     let mut ioring = builder.build(batch_size as u32)?;
-    let mut buf = vec![vec![0; 2048]; batch_size];
+    let buf = vec![vec![0; 2048]; batch_size];
+    // sockaddr_storage is guaranteed to be large enough to hold any possible address.
+    let mut sockaddrs: Vec<sockaddr_storage> =
+        (0..batch_size).map(|_| unsafe { mem::zeroed() }).collect();
+    let mut iovecs: Vec<IoVec<&[u8]>> = buf.iter().map(|buf| IoVec::from_slice(&buf[..])).collect();
+    let mut hdrs: Vec<msghdr> = iovecs
+        .iter_mut()
+        .zip(sockaddrs.iter_mut())
+        .map(|(iovec, mname)| msghdr {
+            msg_name: mname as *mut sockaddr_storage as *mut c_void,
+            msg_namelen: mem::size_of::<sockaddr_storage>() as u32,
+            msg_iov: iovec as *mut IoVec<&[u8]> as *mut iovec,
+            msg_iovlen: 1,
+            msg_flags: 0,
+            msg_controllen: 0,
+            msg_control: ptr::null_mut(),
+        })
+        .collect();
     loop {
-        for buf in buf.iter_mut() {
-            let read_e =
-                opcode::Read::new(types::Fd(sock_fd), buf.as_mut_ptr(), buf.len() as _).build();
+        for (i, hdr) in hdrs.iter_mut().enumerate() {
+            let read_e = opcode::RecvMsg::new(types::Fd(sock_fd), hdr as _)
+                .build()
+                .user_data(i as u64);
             unsafe {
                 ioring.submission().push(&read_e).expect("Could not push");
             }
         }
         ioring.submit_and_wait(batch_size)?;
-        for (i, buf) in buf.iter().enumerate() {
-            let cqe = ioring
-                .completion()
-                .next()
-                .expect("Completion queue is empty");
-            let result = cqe.result() as usize;
-            println!(
-                "{i}th result was {}",
-                std::str::from_utf8(&(buf[0..result])).expect("Could not parse")
-            );
+        for cqe in ioring.completion() {
+            if cqe.result() < 0 {
+                println!("Error: {}", errno::from_i32(-cqe.result()));
+            } else {
+                let idx = cqe.user_data() as usize;
+                let len = cqe.result() as usize;
+                let addr = unsafe {
+                    SockAddr::from_libc_sockaddr(
+                        &sockaddrs[idx] as *const sockaddr_storage as *const sockaddr,
+                    )
+                }
+                .expect("Could not interpret address");
+                println!(
+                    "Received {} bytes for request {} from {}",
+                    len,
+                    idx,
+                    addr
+                );
+                println!(
+                    "Received: {}",
+                    std::str::from_utf8(&buf[idx][0..len]).expect("Unexpected encoding")
+                );
+            }
         }
     }
 }
