@@ -67,7 +67,6 @@ fn sender(batch_size: usize, msg_size: usize) -> std::io::Result<()> {
         ioring.submit_and_wait(batch_size)?;
         for cqe in ioring.completion() {
             let result = cqe.result();
-            println!("result was {result}");
             if result < 0 {
                 println!("Error: {}", errno::from_i32(-cqe.result()));
             }
@@ -122,44 +121,55 @@ fn receiver(batch_size: usize) -> std::io::Result<()> {
             ioring.submission().push(op).expect("Could not push");
         }
     }
-    loop {
+    'outer: loop {
         // Step 2: When we arrive at this point, the cqueue was either empty
         // (or we just started the receive process). Either ways, kick the tires
         // and wait until we receive something.
         ioring.submit_and_wait(1)?;
         // Step 3: We must have received something so process as much data as we can.
         let mut to_process = true;
+        let mut processed = 0;
+        let mut bytes = 0;
         while to_process {
+            processed += 1;
             let idx = {
-                let cqe = ioring.completion().next().unwrap();
-                let idx = cqe.user_data() as usize;
-                if cqe.result() < 0 {
-                    println!("Error: {}", errno::from_i32(-cqe.result()));
-                } else {
-                    let len = cqe.result() as usize;
-                    let addr = unsafe {
-                        SockAddr::from_libc_sockaddr(
-                            &sockaddrs[idx] as *const sockaddr_storage as *const sockaddr,
-                        )
+                if let Some(cqe) = ioring.completion().next() {
+                    let idx = cqe.user_data() as usize;
+                    if cqe.result() < 0 {
+                        println!("Error: {}", errno::from_i32(-cqe.result()));
+                    } else {
+                        let len = cqe.result() as usize;
+                        let _addr = unsafe {
+                            SockAddr::from_libc_sockaddr(
+                                &sockaddrs[idx] as *const sockaddr_storage as *const sockaddr,
+                            )
+                        }
+                        .expect("Could not interpret address");
+                        // println!("Received {} bytes for request {} from {}", len, idx, addr);
+                        bytes += len
+                        // println!(
+                        //     "Received: {}",
+                        //     std::str::from_utf8(&buf[idx][0..len]).expect("Unexpected encoding")
+                        // );
                     }
-                    .expect("Could not interpret address");
-                    println!("Received {} bytes for request {} from {}", len, idx, addr);
-                    println!(
-                        "Received: {}",
-                        std::str::from_utf8(&buf[idx][0..len]).expect("Unexpected encoding")
-                    );
+                    idx
+                } else {
+                    continue 'outer;
                 }
-                idx
             };
             unsafe {
-                ioring
-                    .submission()
-                    .push(&read_ops[idx])
-                    .expect("Could not push");
+                while ioring.submission().push(&read_ops[idx]).is_err() {
+                    ioring.submit_and_wait(1)?;
+                }
             }
-            ioring.completion().sync();
-            to_process = !ioring.completion().is_empty();
+            to_process = if ioring.completion().is_empty() {
+                ioring.completion().sync();
+                !ioring.completion().is_empty()
+            } else {
+                true
+            }
         }
+        println!("Processed {processed} reqs ({bytes} bytes) before waiting");
     }
 }
 
