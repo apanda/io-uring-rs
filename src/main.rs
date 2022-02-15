@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use io_uring::{opcode, types, IoUring};
+use io_uring::{opcode, squeue::Entry, types, IoUring};
 use nix::errno;
 use nix::libc::{iovec, msghdr, sockaddr_storage};
 use nix::sys::socket::{sockaddr, InetAddr, SockAddr};
@@ -107,34 +107,58 @@ fn receiver(batch_size: usize) -> std::io::Result<()> {
         .submitter()
         .register_files(&files[..])
         .expect("Could not register file");
-    loop {
-        for (i, hdr) in hdrs.iter_mut().enumerate() {
-            let read_e = opcode::RecvMsg::new(types::Fd(sock_fd), hdr as _)
+    let read_ops: Vec<Entry> = hdrs
+        .iter_mut()
+        .enumerate()
+        .map(|(i, hdr)| {
+            opcode::RecvMsg::new(types::Fd(sock_fd), hdr as _)
                 .build()
-                .user_data(i as u64);
-            unsafe {
-                ioring.submission().push(&read_e).expect("Could not push");
-            }
+                .user_data(i as u64)
+        })
+        .collect();
+    // Step 1: Set up for initial reception
+    for op in read_ops.iter() {
+        unsafe {
+            ioring.submission().push(op).expect("Could not push");
         }
-        ioring.submit_and_wait(batch_size)?;
-        for cqe in ioring.completion() {
-            if cqe.result() < 0 {
-                println!("Error: {}", errno::from_i32(-cqe.result()));
-            } else {
+    }
+    loop {
+        // Step 2: When we arrive at this point, the cqueue was either empty
+        // (or we just started the receive process). Either ways, kick the tires
+        // and wait until we receive something.
+        ioring.submit_and_wait(1)?;
+        // Step 3: We must have received something so process as much data as we can.
+        let mut to_process = true;
+        while to_process {
+            let idx = {
+                let cqe = ioring.completion().next().unwrap();
                 let idx = cqe.user_data() as usize;
-                let len = cqe.result() as usize;
-                let addr = unsafe {
-                    SockAddr::from_libc_sockaddr(
-                        &sockaddrs[idx] as *const sockaddr_storage as *const sockaddr,
-                    )
+                if cqe.result() < 0 {
+                    println!("Error: {}", errno::from_i32(-cqe.result()));
+                } else {
+                    let len = cqe.result() as usize;
+                    let addr = unsafe {
+                        SockAddr::from_libc_sockaddr(
+                            &sockaddrs[idx] as *const sockaddr_storage as *const sockaddr,
+                        )
+                    }
+                    .expect("Could not interpret address");
+                    println!("Received {} bytes for request {} from {}", len, idx, addr);
+                    println!(
+                        "Received: {}",
+                        std::str::from_utf8(&buf[idx][0..len]).expect("Unexpected encoding")
+                    );
                 }
-                .expect("Could not interpret address");
-                println!("Received {} bytes for request {} from {}", len, idx, addr);
-                println!(
-                    "Received: {}",
-                    std::str::from_utf8(&buf[idx][0..len]).expect("Unexpected encoding")
-                );
+                idx
+            };
+            unsafe {
+                ioring
+                    .submission()
+                    .push(&read_ops[idx])
+                    .expect("Could not push");
             }
+            ioring.completion().sync();
+            to_process = !ioring.completion().is_empty();
         }
     }
 }
