@@ -77,15 +77,17 @@ fn sender(batch_size: usize, msg_size: usize) -> std::io::Result<()> {
 
 fn receiver(batch_size: usize) -> std::io::Result<()> {
     let mut builder = IoUring::builder();
-    builder.dontfork();
+    // The 1ms stall timer is sort of arbitrary here.
+    builder.dontfork().setup_sqpoll(1);
     let sock =
         UdpSocket::bind("127.0.0.1:7200").expect("Could not bind port 7200. Why? Who knows.");
     let sock_fd = sock.as_raw_fd();
     let mut ioring = builder.build(batch_size as u32)?;
     let buf = vec![vec![0; 2048]; batch_size];
     // sockaddr_storage is guaranteed to be large enough to hold any possible address.
-    let mut sockaddrs: Vec<sockaddr_storage> =
-        (0..batch_size).map(|_| unsafe { mem::MaybeUninit::zeroed().assume_init() }).collect();
+    let mut sockaddrs: Vec<sockaddr_storage> = (0..batch_size)
+        .map(|_| unsafe { mem::MaybeUninit::zeroed().assume_init() })
+        .collect();
     let mut iovecs: Vec<IoVec<&[u8]>> = buf.iter().map(|buf| IoVec::from_slice(&buf[..])).collect();
     let mut hdrs: Vec<msghdr> = iovecs
         .iter_mut()
@@ -100,6 +102,11 @@ fn receiver(batch_size: usize) -> std::io::Result<()> {
             msg_control: ptr::null_mut(),
         })
         .collect();
+    let files = [sock_fd];
+    ioring
+        .submitter()
+        .register_files(&files[..])
+        .expect("Could not register file");
     loop {
         for (i, hdr) in hdrs.iter_mut().enumerate() {
             let read_e = opcode::RecvMsg::new(types::Fd(sock_fd), hdr as _)
@@ -122,12 +129,7 @@ fn receiver(batch_size: usize) -> std::io::Result<()> {
                     )
                 }
                 .expect("Could not interpret address");
-                println!(
-                    "Received {} bytes for request {} from {}",
-                    len,
-                    idx,
-                    addr
-                );
+                println!("Received {} bytes for request {} from {}", len, idx, addr);
                 println!(
                     "Received: {}",
                     std::str::from_utf8(&buf[idx][0..len]).expect("Unexpected encoding")
