@@ -145,12 +145,7 @@ fn receiver(batch_size: usize) -> std::io::Result<()> {
                             )
                         }
                         .expect("Could not interpret address");
-                        // println!("Received {} bytes for request {} from {}", len, idx, addr);
                         bytes += len
-                        // println!(
-                        //     "Received: {}",
-                        //     std::str::from_utf8(&buf[idx][0..len]).expect("Unexpected encoding")
-                        // );
                     }
                     idx
                 } else {
